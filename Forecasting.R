@@ -15,7 +15,10 @@ library(ggplot2)
 library(ggthemes)
 library(xtable)
 library(e1071)   
+library(car)
+library(cragg)
 
+#h governs the forecast horizon
 h = 1
 
 #reading vix data
@@ -62,6 +65,7 @@ df$VIX_nolog <- df$VIXCLS
 df$VIXCLS <- log(df$VIXCLS)
 
 
+
 #creating lagged regressors for past averages of VIX
 l <- c(1, 5, 22)
 for (i in 1:dim(df)){
@@ -79,6 +83,69 @@ for (i in 1:dim(df)){
 df["y0"] <- Lag(df$VIXCLS, -h)
 
 
+
+#ECONOMIC VARS
+df_sp500 <- read.csv(file="source/volatility/SPY.csv")
+df_sp500$DATE <- as.Date(df_sp500$Date, format="%m/%d/%Y")
+#df_libor<- read.csv(file="source/volatility/LIBOR.csv")
+#df_libor$DATE <- as.Date(df_libor$DATE, format="%m/%d/%Y")
+df_10y <- read.csv(file="source/volatility/10YEAR.csv")
+df_10y$DATE <- as.Date(df_10y$DATE, format="%m/%d/%Y")
+df_3m <- read.csv(file="source/volatility/3MONTH.csv")
+df_3m$DATE <- as.Date(df_3m$DATE, format="%m/%d/%Y")
+df_oil <- read.csv(file="source/volatility/OIL.csv")
+df_oil$DATE <- as.Date(df_oil$DATE, format="%m/%d/%Y")
+df_credit <- read.csv(file="source/volatility/CREDIT.csv")
+df_credit$DATE <- as.Date(df_credit$DATE, format="%m/%d/%Y")
+
+
+df <- merge(df, df_sp500, by=c("DATE"), all.x=TRUE)
+df <- merge(df, df_3m, by=c("DATE"), all.x=TRUE)
+df <- merge(df, df_10y, by=c("DATE"), all.x=TRUE)
+df <- merge(df, df_oil, by=c("DATE"), all.x=TRUE)
+df <- merge(df, df_credit, by=c("DATE"), all.x=TRUE)
+
+#imputing missing vars with previous day's value
+var_list <- c("adjclose", "volume", "credit", "tres10y", "tres3m", "oil")
+for (i in 1:dim(df)){
+  for (var in var_list){
+    if(is.na(df[i, var])){
+      df[i, var] <- df[i-1, var]
+    }
+  }
+}
+
+
+#computing past sp500 returns for each k in l
+for(k in l){
+  df[,paste("d_sp_", k, sep="")] <- 100 * (df[,"adjclose"] - Lag(df[,"adjclose"], k)) / Lag(df[,"adjclose"], k)
+  df[,paste("d_oil_", k, sep="")] <- 100 * (df[,"oil"] - Lag(df[,"oil"], k)) / Lag(df[,"oil"], k)
+}
+df[,"term_spread"] <- df[,"tres10y"] - df["tres3m"]
+df[,"d_term_spread"] <- c(NA, diff(df[,"term_spread"]))
+df[,"d_credit_spread"] <- c(NA, diff(df[, "credit"]))
+df[,"d_volume"] <- c(NA, diff(log(df[,"volume"])))
+
+
+
+
+#dropping vars lost due to averaging
+df <- df[!is.na(df$d_sp_22), ]
+df <- df[!is.na(df$y0), ]
+
+var_list <- c("d_sp_1", "d_sp_5", "d_sp_22", "d_oil_1", "d_oil_5", "d_oil_22", "d_term_spread", "d_credit_spread", "d_volume" )
+#var_list <- c("y0", "VIX_nolog", "volume", "term_spread", "credit", "oil")
+#adf test
+for(var in var_list){
+  print(var)
+  print(adf.test(na.omit(df[,var])))
+}
+
+
+
+
+
+
 df["bert_score_prob"] <- ifelse(df$bert_sent==2, df$bert_score, 1-df$bert_score)
 #df["bert_fin_score_prob"] <- ifelse(df$finbert_sent==2, df$finbert_score, ifelse(df$finbert_sent == 1, 0.5, 1-df$finbert_score))
 #df["roberta_score_prob"] <- ifelse(df$roberta_sent==2, df$roberta_score, ifelse(df$roberta_sent == 1, 0.5, 1-df$roberta_score))
@@ -90,14 +157,52 @@ df["xlnet_score_prob"] <- ifelse(df$xlnet_sent2==2, df$xlnet_score2, 1-df$xlnet_
 df["electra_score_prob"] <- ifelse(df$electra_sent==2, df$electra_score, 1-df$electra_score)
 
 #creating fitted sentiment regressor based on OLS fitted values of other sentiment predictions
-sent.fit.bert <- lm(data=df, bert_score_prob ~ roberta_score_prob + xlnet_score_prob + electra_score_prob)
-sent.fit.roberta <- lm(data=df, roberta_score_prob ~ bert_score_prob  + xlnet_score_prob + electra_score_prob)
-sent.fit.xlnet <- lm(data=df, xlnet_score_prob ~ roberta_score_prob + bert_score_prob  + electra_score_prob)
-sent.fit.electra <- lm(data=df, electra_score_prob ~ roberta_score_prob + xlnet_score_prob + bert_score_prob)
+sent.fit.bert <- lm(data=df, bert_score_prob ~ roberta_score_prob + xlnet_score_prob + electra_score_prob + d_sp_1 + d_sp_5 + d_sp_22 + d_oil_1 + d_oil_5 + d_oil_22 + d_term_spread + d_credit_spread + d_volume)
+sent.fit.roberta <- lm(data=df, roberta_score_prob ~ bert_score_prob  + xlnet_score_prob + electra_score_prob + d_sp_1 + d_sp_5  + d_sp_22 + d_oil_1+ d_oil_5  + d_oil_22 + d_term_spread + d_credit_spread + d_volume)
+sent.fit.xlnet <- lm(data=df, xlnet_score_prob ~ roberta_score_prob + bert_score_prob  + electra_score_prob + d_sp_1  + d_sp_5 + d_sp_22 + d_oil_1 + d_oil_5 + d_oil_22 + d_term_spread + d_credit_spread + d_volume)
+sent.fit.electra <- lm(data=df, electra_score_prob ~ roberta_score_prob + xlnet_score_prob + bert_score_prob + d_sp_1 + d_sp_5 + d_sp_22  + d_oil_1 + d_oil_5 + d_oil_22  + d_term_spread + d_credit_spread + d_volume) 
 summary(sent.fit.bert)
 summary(sent.fit.roberta)
 summary(sent.fit.xlnet)
 summary(sent.fit.electra)
+
+print(stock_yogo_test(~d_sp_1 + d_sp_5 + d_sp_22  + d_oil_1 + d_oil_5 + d_oil_22  + d_term_spread + d_credit_spread + d_volume,
+                      ~bert_score_prob,
+                      ~roberta_score_prob + xlnet_score_prob + electra_score_prob ,
+                      B=.1,
+                      size_bias="size",
+                      data=df[!is.na(df$bert_score_prob), ]))
+print(stock_yogo_test(~d_sp_1 + d_sp_5 + d_sp_22  + d_oil_1 + d_oil_5 + d_oil_22  + d_term_spread + d_credit_spread + d_volume,
+                      ~roberta_score_prob,
+                      ~ bert_score_prob + xlnet_score_prob + electra_score_prob ,
+                      B=.1,
+                      size_bias="size",
+                      data=df[!is.na(df$bert_score_prob), ]))
+print(stock_yogo_test(~d_sp_1 + d_sp_5 + d_sp_22  + d_oil_1 + d_oil_5 + d_oil_22  + d_term_spread + d_credit_spread + d_volume,
+                      ~ xlnet_score_prob,
+                      ~roberta_score_prob + bert_score_prob + electra_score_prob ,
+                      B=.1,
+                      size_bias="size",
+                      data=df[!is.na(df$bert_score_prob), ]))
+print(stock_yogo_test(~d_sp_1 + d_sp_5 + d_sp_22  + d_oil_1 + d_oil_5 + d_oil_22  + d_term_spread + d_credit_spread + d_volume,
+                      ~ electra_score_prob,
+                      ~roberta_score_prob + xlnet_score_prob + bert_score_prob ,
+                      B=.1,
+                      size_bias="size",
+                      data=df[!is.na(df$bert_score_prob), ]))
+
+
+
+
+print(linearHypothesis(sent.fit.bert, c("roberta_score_prob=0", "xlnet_score_prob=0", "electra_score_prob=0"), white.adjust="hc3"))
+print(linearHypothesis(sent.fit.roberta, c("bert_score_prob=0", "xlnet_score_prob=0", "electra_score_prob=0"), white.adjust="hc3"))
+print(linearHypothesis(sent.fit.xlnet, c("roberta_score_prob=0", "bert_score_prob=0", "electra_score_prob=0"), white.adjust="hc3"))
+print(linearHypothesis(sent.fit.electra, c("roberta_score_prob=0", "xlnet_score_prob=0", "bert_score_prob=0"), white.adjust="hc3"))
+
+print(linearHypothesis(sent.fit.bert, c("d_sp_1=0", "d_sp_5=0", "d_sp_22=0", "d_oil_1=0", "d_oil_5=0", "d_oil_22=0", "d_term_spread=0", "d_credit_spread=0", "d_volume=0"), white.adjust="hc3"))
+print(linearHypothesis(sent.fit.roberta, c("d_sp_1=0", "d_sp_5=0", "d_sp_22=0", "d_oil_1=0", "d_oil_5=0", "d_oil_22=0", "d_term_spread=0", "d_credit_spread=0", "d_volume=0"), white.adjust="hc3"))
+print(linearHypothesis(sent.fit.xlnet, c("d_sp_1=0", "d_sp_5=0", "d_sp_22=0", "d_oil_1=0", "d_oil_5=0", "d_oil_22=0", "d_term_spread=0", "d_credit_spread=0", "d_volume=0"), white.adjust="hc3"))
+print(linearHypothesis(sent.fit.electra, c("d_sp_1=0", "d_sp_5=0", "d_sp_22=0", "d_oil_1=0", "d_oil_5=0", "d_oil_22=0", "d_term_spread=0", "d_credit_spread=0", "d_volume=0"), white.adjust="hc3"))
 
 sent.fit.bert.nw <- coeftest(sent.fit.bert, vcov=NeweyWest(sent.fit.bert, prewhite=F, adjust=T))
 print(sent.fit.bert.nw)
@@ -223,7 +328,6 @@ for (i in 1:dim(df)){
 for(k in l){
   df[,paste("fa_scores_p", k, sep="")][is.na(df[,paste("fa_scores_p", k, sep="")])] <- 0
   df[,paste("fa_scores_n", k, sep="")][is.na(df[,paste("fa_scores_n", k, sep="")])] <- 0
-  
 }
 
 
@@ -329,65 +433,6 @@ for (q in Q){
  
 
 
-
-
-#ECONOMIC VARS
-df_sp500 <- read.csv(file="source/volatility/SPY.csv")
-df_sp500$DATE <- as.Date(df_sp500$Date, format="%m/%d/%Y")
-#df_libor<- read.csv(file="source/volatility/LIBOR.csv")
-#df_libor$DATE <- as.Date(df_libor$DATE, format="%m/%d/%Y")
-df_10y <- read.csv(file="source/volatility/10YEAR.csv")
-df_10y$DATE <- as.Date(df_10y$DATE, format="%m/%d/%Y")
-df_3m <- read.csv(file="source/volatility/3MONTH.csv")
-df_3m$DATE <- as.Date(df_3m$DATE, format="%m/%d/%Y")
-df_oil <- read.csv(file="source/volatility/OIL.csv")
-df_oil$DATE <- as.Date(df_oil$DATE, format="%m/%d/%Y")
-df_credit <- read.csv(file="source/volatility/CREDIT.csv")
-df_credit$DATE <- as.Date(df_credit$DATE, format="%m/%d/%Y")
-
-
-df <- merge(df, df_sp500, by=c("DATE"), all.x=TRUE)
-df <- merge(df, df_3m, by=c("DATE"), all.x=TRUE)
-df <- merge(df, df_10y, by=c("DATE"), all.x=TRUE)
-df <- merge(df, df_oil, by=c("DATE"), all.x=TRUE)
-df <- merge(df, df_credit, by=c("DATE"), all.x=TRUE)
-
-#imputing missing vars with previous day's value
-var_list <- c("adjclose", "volume", "credit", "tres10y", "tres3m", "oil")
-for (i in 1:dim(df)){
-  for (var in var_list){
-    if(is.na(df[i, var])){
-      df[i, var] <- df[i-1, var]
-    }
-  }
-}
-
-
-#computing past sp500 returns for each k in l
-for(k in l){
-  df[,paste("d_sp_", k, sep="")] <- 100 * (df[,"adjclose"] - Lag(df[,"adjclose"], k)) / Lag(df[,"adjclose"], k)
-  df[,paste("d_oil_", k, sep="")] <- 100 * (df[,"oil"] - Lag(df[,"oil"], k)) / Lag(df[,"oil"], k)
-}
-df[,"term_spread"] <- df[,"tres10y"] - df["tres3m"]
-df[,"d_term_spread"] <- c(NA, diff(df[,"term_spread"]))
-df[,"d_credit_spread"] <- c(NA, diff(df[, "credit"]))
-df[,"d_volume"] <- c(NA, diff(log(df[,"volume"])))
-
-
-
-
-#dropping vars lost due to averaging
-df <- df[!is.na(df$d_sp_22), ]
-df <- df[!is.na(df$y0), ]
-
-var_list <- c("d_sp_1", "d_sp_5", "d_sp_22", "d_oil_1", "d_oil_5", "d_oil_22", "d_term_spread", "d_credit_spread", "d_volume" )
-#var_list <- c("y0", "VIX_nolog", "volume", "term_spread", "credit", "oil")
-#adf test
-for(var in var_list){
-  print(var)
-  print(adf.test(na.omit(df[,var])))
-}
-
 #correlation matrix
 corr_df = df[,c("bert_score_prob", "roberta_score_prob", "xlnet_score_prob", "electra_score_prob")]
 corr_df <- corr_df[!is.na(corr_df$roberta_score_prob), ]
@@ -430,6 +475,17 @@ for(q in Q){
   formulas.iv <- c(formulas.iv, as.formula(paste("y0~", paste(c(har.vars, econ.vars, iv.vars), collapse="+"))))
 }
 
+for(formula_ in formulas.iv){
+  f1.fit <- lm(data=df, formula = formula_, na.action=na.omit)
+  fit.nw <- coeftest(f1.fit, vcov=NeweyWest(f1.fit, prewhite=F, adjust=T))
+  print(fit.nw)
+  print(linearHypothesis(f1.fit, c("d_sp_1=0", "d_sp_5=0", "d_sp_22=0", "d_oil_1=0", "d_oil_5=0", "d_oil_22=0", "d_term_spread=0", "d_credit_spread=0", "d_volume=0"), white.adjust="hc3"))
+  print(summary(f1.fit))
+  x = x
+  }
+
+
+
 #creating vector of model fomulas for equal weights
 formulas.ew.sm <- c()
 formulas.ew.iv <- c()
@@ -442,6 +498,7 @@ for (k in l){
 }
 formulas.ew.sm <- c(formulas.ew.sm, as.formula(paste("y0~", paste(c(har.vars, econ.vars, ew.vars.sm), collapse="+"))))
 formulas.ew.iv <- c(formulas.ew.iv, as.formula(paste("y0~", paste(c(har.vars, econ.vars, ew.vars.iv), collapse="+"))))
+
 
 
 #DM test between each model's forecast
@@ -473,16 +530,20 @@ for (f1 in all.formulas){
     }
   }
 }
-print(xtable(dm.test, type="latex"))
+dm.test <- cbind(c("HAR", "HARX", "SM-BE", "SM-RO", "SM-XL", "SM-EL", "SM-EW", "IV-BE", "IV-RO", "IV-XL", "IV-EL", "IV-EW", "FA"), dm.test)
+dm.test <- dm.test[-c(1),]
+dm.test <- dm.test[,-c(ncol(dm.test))]
+print(xtable(dm.test, type="latex"), include.rownames=FALSE)
 
 
 
 #testing out of sample predictive performance
+#output is printed in latex format
 oos.test <- matrix(0, nrow=length(all.formulas), ncol=4)
 formula_index <- 0
 for (f in all.formulas){
   formula_index <- formula_index + 1
-  i <- 1100
+  i <- 1500
   n <- 0
   mfe <- 0
   mse <- 0
@@ -567,4 +628,13 @@ ggplot(df_reduced_speech, aes(year)) +
   geom_bar(fill="#0a6dc9") + 
   labs(y="Number of Speeches", x="") +
   theme_bw()
+
+
+
+
+
+
+
+
+
 
